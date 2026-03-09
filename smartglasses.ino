@@ -18,13 +18,11 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 // ---------------- Sensors ----------------
 MAX30105 heartSensor;
 Adafruit_VL53L0X laser = Adafruit_VL53L0X();
-
 OneWire oneWire(6);
 DallasTemperature ds18b20(&oneWire);
 
-// ---------------- WiFi Time ----------------
+// ---------------- WiFi & Time ----------------
 char ssid[] = "Vidor_WiFi";
-
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", -5*3600);
 
@@ -34,35 +32,20 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", -5*3600);
 #define SPEED_PIN 2
 #define TOUCH_PIN 7
 
-#define ROTARY_CLK 8
-#define ROTARY_DT 9
-#define ROTARY_SW 10
-
 #define ULTRASONIC_TRIG 3
 #define ULTRASONIC_ECHO 11
 
-long readUltrasonicCM() {
-  digitalWrite(ULTRASONIC_TRIG, LOW);
-  delayMicroseconds(2);
-  digitalWrite(ULTRASONIC_TRIG, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(ULTRASONIC_TRIG, LOW);
-
-  long duration = pulseIn(ULTRASONIC_ECHO, HIGH);
-  long cm = duration / 29 / 2;
-  return cm;
-}
+#define JOY_X A0
+#define JOY_SW 10
 
 volatile int speedCount = 0;
-void speedISR(){ speedCount++; }
+void speedISR() { speedCount++; }
 
 // ---------------- Menu ----------------
 int menuIndex = 0;
+int selectedPage = 0;
+const int menuItems = 5;
 bool inMenu = true;
-
-const int menuItems = 4;
-
-int lastCLK;
 
 // ---------------- Heart BPM ----------------
 unsigned long lastBeat = 0;
@@ -71,30 +54,35 @@ bool beatDetected = false;
 const int THRESHOLD = 50000;
 
 // ---------------- Sensor Values ----------------
-int flame;
-int ir;
-int speed;
+int flame, ir, speed, laserDist;
 float tempF;
-int laserDist;
-long redValue;
+long redValue, ultrasonicDist;
+
+// ---------------- Read Ultrasonic ----------------
+long readUltrasonicCM() {
+  digitalWrite(ULTRASONIC_TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(ULTRASONIC_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(ULTRASONIC_TRIG, LOW);
+  long duration = pulseIn(ULTRASONIC_ECHO, HIGH);
+  return duration / 29 / 2; // cm
+}
 
 // ---------------- Setup ----------------
 void setup() {
-
   Serial.begin(9600);
 
   pinMode(FLAME_PIN, INPUT);
   pinMode(IR_PIN, INPUT);
   pinMode(SPEED_PIN, INPUT_PULLUP);
-  pinMode(TOUCH_PIN, INPUT);
-
-  pinMode(ROTARY_CLK, INPUT);
-  pinMode(ROTARY_DT, INPUT);
-  pinMode(ROTARY_SW, INPUT_PULLUP);
-
   attachInterrupt(digitalPinToInterrupt(SPEED_PIN), speedISR, RISING);
 
-  lastCLK = digitalRead(ROTARY_CLK);
+  pinMode(TOUCH_PIN, INPUT);
+  pinMode(ULTRASONIC_TRIG, OUTPUT);
+  pinMode(ULTRASONIC_ECHO, INPUT);
+
+  pinMode(JOY_SW, INPUT_PULLUP);
 
   Wire.begin();
 
@@ -103,28 +91,23 @@ void setup() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
 
-  // Heart sensor
-  if(heartSensor.begin(Wire, I2C_SPEED_STANDARD))
-    heartSensor.setup();
+  // Heart
+  if(heartSensor.begin(Wire, I2C_SPEED_STANDARD)) heartSensor.setup();
 
   // Laser
   laser.begin();
 
+  // Temp
   ds18b20.begin();
 
   // WiFi
   int status = WiFi.begin(ssid);
-  while(status != WL_CONNECTED){
-    delay(1000);
-    status = WiFi.begin(ssid);
-  }
-
+  while(status != WL_CONNECTED){ delay(1000); status = WiFi.begin(ssid);}
   timeClient.begin();
 }
 
 // ---------------- Read Sensors ----------------
-void readSensors(){
-
+void readSensors() {
   flame = digitalRead(FLAME_PIN);
   ir = digitalRead(IR_PIN);
 
@@ -136,162 +119,105 @@ void readSensors(){
 
   VL53L0X_RangingMeasurementData_t measure;
   laser.rangingTest(&measure, false);
-
-  if(measure.RangeStatus != 4)
-    laserDist = measure.RangeMilliMeter;
-  else
-    laserDist = -1;
+  laserDist = (measure.RangeStatus != 4) ? measure.RangeMilliMeter : -1;
 
   redValue = heartSensor.getRed();
 
-  unsigned long now = millis();
+  ultrasonicDist = readUltrasonicCM();
 
+  unsigned long now = millis();
   if(redValue > THRESHOLD && !beatDetected){
     beatDetected = true;
     bpm = 60000 / (now - lastBeat);
     lastBeat = now;
   }
-
-  if(redValue < THRESHOLD)
-    beatDetected = false;
+  if(redValue < THRESHOLD) beatDetected = false;
 }
 
-// ---------------- Rotary ----------------
-void checkEncoder() {
-  static int lastDT = LOW;
-  int clk = digitalRead(ROTARY_CLK);
-  int dt  = digitalRead(ROTARY_DT);
+// ---------------- Joystick Menu ----------------
+void checkJoystick() {
+  int joyX = analogRead(JOY_X);
 
-  // detect change on CLK
-  if(clk != lastCLK) {
-    if(dt != clk) menuIndex++;   // clockwise
-    else menuIndex--;            // counterclockwise
-
-    // wrap around
-    if(menuIndex < 0) menuIndex = menuItems - 1;
+  // Scroll Right
+  if(joyX > 600){
+    menuIndex++;
     if(menuIndex >= menuItems) menuIndex = 0;
-
-    Serial.print("Menu Index: "); Serial.println(menuIndex);
+    delay(150);
+  }
+  // Scroll Left
+  else if(joyX < 400){
+    menuIndex--;
+    if(menuIndex < 0) menuIndex = menuItems - 1;
+    delay(150);
   }
 
-  lastCLK = clk;
-}
-
-// ---------------- Button ----------------
-void checkButton(){
-
-  if(digitalRead(ROTARY_SW) == LOW){
-
+  // Press to select
+  if(digitalRead(JOY_SW) == LOW){
+    selectedPage = menuIndex;
+    inMenu = false;
     delay(200);
-
-    if(inMenu)
-      inMenu = false;
-    else
-      inMenu = true;
   }
 }
 
-// ---------------- Menu Screen ----------------
+// ---------------- Draw Menu ----------------
 void drawMenu(){
-
-  String items[4] = {
-    "Environment",
-    "Distance",
-    "Heart Rate",
-    "System"
-  };
-
+  String items[5] = {"Environment","Distance","Heart Rate","System","Extra"};
   display.setTextSize(1);
-
   for(int i=0;i<menuItems;i++){
-
-    display.setCursor(0,i*15);
-
-    if(i==menuIndex)
-      display.print("> ");
-    else
-      display.print("  ");
-
+    display.setCursor(0,i*12);
+    if(i==menuIndex) display.print("> ");
+    else display.print("  ");
     display.println(items[i]);
   }
 }
 
-// ---------------- Pages ----------------
+// ---------------- Draw Pages ----------------
 void drawPage(){
-
   display.setTextSize(1);
   display.setCursor(0,0);
-
-  switch(menuIndex){
-
+  switch(selectedPage){
     case 0:
-      display.println("Temp F:");
-      display.println(tempF);
-
-      display.println("Speed:");
-      display.println(speed);
-
-      display.println("Flame:");
-      display.println(flame);
-    break;
-
+      display.println("Temp F: " + String(tempF));
+      display.println("Speed: " + String(speed));
+      display.println("Flame: " + String(flame));
+      break;
     case 1:
-      display.println("Laser mm:");
-      display.println(laserDist);
-
-      display.println("IR:");
-      display.println(ir);
-    break;
-
+      display.println("Laser mm: " + String(laserDist));
+      display.println("IR: " + String(ir));
+      display.println("Ultrasonic cm: " + String(ultrasonicDist));
+      break;
     case 2:
-      display.println("Heart BPM:");
-      display.println(bpm);
-
-      display.println("Raw:");
-      display.println(redValue);
-    break;
-
+      display.println("Heart BPM: " + String(bpm));
+      display.println("Raw: " + String(redValue));
+      break;
     case 3:
-      display.println("IP:");
-      display.println(WiFi.localIP());
-
-      display.println("Touch:");
-      display.println(digitalRead(TOUCH_PIN));
-
+      display.println("IP: " + WiFi.localIP().toString());
+      display.println("Touch: " + digitalRead(TOUCH_PIN));
       timeClient.update();
-
-      display.println("Time:");
-      display.println(timeClient.getFormattedTime());
-    break;
-
+      display.println("Time: " + timeClient.getFormattedTime());
+      break;
     case 4:
-      display.println("Laser mm:");
-      display.println(laserDist);
-      display.println("Ultrasonic cm:");
-      display.println(ultrasonicDist);
-      display.println("IR:");
-      display.println(ir);
-    break;
-
+      display.println("Extra Sensor Page");
+      break;
   }
 }
 
 // ---------------- Loop ----------------
 void loop(){
-
   readSensors();
-
-  checkEncoder();
-  checkButton();
+  checkJoystick();
 
   display.clearDisplay();
-
-  if(inMenu)
-    drawMenu();
-  else
-    drawPage();
-
+  if(inMenu) drawMenu();
+  else drawPage();
   display.display();
 
   delay(100);
+
+  if(ultrasonicDist >= 32){
+    display.println("Safe Distance");
+  }
+  if(ultrasonicDist <= 31){
+    display.println("Danger!");
+  }
 }
