@@ -89,7 +89,7 @@ WiFiS3
 
 Clone this repo:
 
-git clone https://github.com/yourusername/fursuit-smart-glasses.git
+git clone https://github.com/Catnap895/PawHUD.git
 
 Open smartglasses.ino in Arduino IDE.
 
